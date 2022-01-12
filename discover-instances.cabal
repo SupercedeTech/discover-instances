@@ -36,6 +36,7 @@ library
     , some-dict-of
     , template-haskell
     , th-compat
+    , lift-generics
   default-language: Haskell2010
 
 test-suite discover-instances-test

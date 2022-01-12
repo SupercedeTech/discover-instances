@@ -10,6 +10,17 @@ import Data.Proxy
 import Data.Typeable
 import DiscoverInstances
 
+showWithType :: [(LiftedType, SomeDict Functor)]
+showWithType = $$discoverInstancesWithType
+
+eqWithType :: [(LiftedType, SomeDict Functor)]
+eqWithType = $$discoverInstancesWithType
+
+functorWithType :: [(LiftedType, SomeDict Functor)]
+functorWithType = $$discoverInstancesWithType
+
+
+
 show :: [SomeDict Show]
 show = $$(discoverInstances @Show)
 
@@ -23,3 +34,6 @@ main :: IO ()
 main = do
     for_ functor $ \(SomeDictOf p@(Proxy :: Proxy t)) -> do
         print 1234
+
+    for_ functorWithType $ \(lifted, SomeDictOf p@(Proxy :: Proxy t)) -> do
+        print lifted

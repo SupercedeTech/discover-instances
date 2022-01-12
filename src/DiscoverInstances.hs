@@ -8,6 +8,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 
 -- | Generally speaking, this module is only useful to discover instances
 -- of unary type classes where the instance is unconstrained.
@@ -30,8 +34,10 @@ module DiscoverInstances
       discoverInstances
     -- * Using the results of 'discoverInstances'
     -- $using
+    , discoverInstancesWithType
     , withInstances
     , forInstances
+    , LiftedType
     , module SomeDictOf
     -- * Re-exports
     , module Data.Proxy
@@ -79,8 +85,16 @@ import SomeDictOf
 -- But you'll get an error if you type-apply like that.
 --
 -- @since 0.1.0.0
-discoverInstances :: forall (c :: _ -> Constraint) . (Typeable c) => SpliceQ [SomeDict c]
-discoverInstances = liftSplice $ do
+discoverInstances ::  forall (c :: _ -> Constraint) . (Typeable c) => SpliceQ [SomeDict c]
+discoverInstances = do
+  texp <- examineSplice $ discoverInstancesWithType @c
+  [|| snd <$> $$(liftSplice $ pure texp) ||]
+
+-- | same as 'discoverInstances' but keeps the type,
+--   useful for aligning related constraints such as 'Show' and 'Read'.
+-- @since 0.1.1.0
+discoverInstancesWithType :: forall (c :: _ -> Constraint) . (Typeable c) => SpliceQ [(LiftedType, SomeDict c)]
+discoverInstancesWithType = liftSplice $ do
     let
         className =
             show (typeRep (Proxy @c))
@@ -215,12 +229,21 @@ forInstances dicts f =
 listTE :: [TExp a] -> TExp [a]
 listTE = TExp . ListE . map unType
 
-decToDict :: forall k (c :: k -> Constraint). InstanceDec -> Q (TExp [SomeDict c])
+-- This representation may not be the best...
+-- it'd be better to Lift out the full Type,
+-- but that requires either an orphan, or redefining most of the Type
+-- adt so we can replace it's members with newtypes.
+-- using this newtype and hiding the constructor opens up that future possibility
+newtype LiftedType = MkLiftedType String
+  deriving newtype (Eq, Ord, Show)
+
+decToDict :: forall k (c :: k -> Constraint). InstanceDec -> Q (TExp [(LiftedType, SomeDict c)])
 decToDict = \case
     InstanceD _moverlap cxt typ _decs ->
         case cxt of
             [] -> do
                 let
+                    t :: Type
                     t =
                         case typ of
                             AppT _ t' ->
@@ -233,7 +256,9 @@ decToDict = \case
                         x
                     proxy =
                         [| Proxy :: Proxy $(pure t) |]
-                unsafeTExpCoerce [| [ SomeDictOf $proxy ] |]
+
+                    liftRep = pprint t
+                unsafeTExpCoerce [| [(MkLiftedType liftRep, SomeDictOf $proxy)] |]
             _ -> do
                 -- reportWarning $
                 --     "I haven't figured out how to put constrained instances on here, so I'm skipping the type: "
