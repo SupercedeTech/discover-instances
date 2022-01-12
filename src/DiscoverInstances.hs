@@ -8,6 +8,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 
 -- | Generally speaking, this module is only useful to discover instances
 -- of unary type classes where the instance is unconstrained.
@@ -30,13 +35,17 @@ module DiscoverInstances
       discoverInstances
     -- * Using the results of 'discoverInstances'
     -- $using
+    , discoverInstancesWithType
     , withInstances
     , forInstances
+    , LiftedType
+    , SomeDictAndType(..)
     , module SomeDictOf
     -- * Re-exports
     , module Data.Proxy
     ) where
 
+import Control.Monad.IO
 import Data.Proxy
 import Data.Typeable
 import Language.Haskell.TH hiding (cxt)
@@ -79,8 +88,16 @@ import SomeDictOf
 -- But you'll get an error if you type-apply like that.
 --
 -- @since 0.1.0.0
-discoverInstances :: forall (c :: _ -> Constraint) . (Typeable c) => SpliceQ [SomeDict c]
-discoverInstances = liftSplice $ do
+discoverInstances ::  forall (c :: _ -> Constraint) . (Typeable c) => SpliceQ [SomeDict c]
+discoverInstances = do
+  texp <- examineSplice $ discoverInstancesWithType @c
+  [|| sdatSomeDict <$> $$(liftSplice $ pure texp) ||]
+
+-- | same as 'discoverInstances' but keeps the type,
+--   useful for aligning related constraints such as 'Show' and 'Read'.
+-- @since 0.1.1.0
+discoverInstancesWithType :: forall (c :: _ -> Constraint) . (Typeable c) => SpliceQ [SomeDictAndType c]
+discoverInstancesWithType = liftSplice $ do
     let
         className =
             show (typeRep (Proxy @c))
@@ -215,12 +232,35 @@ forInstances dicts f =
 listTE :: [TExp a] -> TExp [a]
 listTE = TExp . ListE . map unType
 
-decToDict :: forall k (c :: k -> Constraint). InstanceDec -> Q (TExp [SomeDict c])
+-- This representation may not be the best...
+-- it'd be better to Lift out the full Type,
+-- but that requires either an orphan, or redefining most of the Type
+-- adt so we can replace it's members with newtypes.
+-- using this newtype and hiding the constructor opens up that future possibility
+newtype LiftedType = MkLiftedType String
+  deriving newtype (Eq, Ord, Show)
+
+data SomeDictAndType c = MkSomeDictAndType {
+      sdatSomeDict :: SomeDict c
+    , sdatLifted   :: LiftedType -- ^ this is the TH pprint rep
+    , sdatRep      :: Maybe TypeRep -- ^ This only gets filled if there is a typeable instance
+    }
+
+instance Eq (SomeDictAndType c) where
+  (==) (MkSomeDictAndType _ drLifteda drRepa) (MkSomeDictAndType _ drLiftedb drRepb) = (drLifteda == drLiftedb) && (drRepa == drRepb)
+
+instance Ord (SomeDictAndType c) where
+  (<=) (MkSomeDictAndType _ drLifteda drRepa) (MkSomeDictAndType _ drLiftedb drRepb) = (drLifteda <= drLiftedb) && (drRepa <= drRepb)
+
+decToDict :: forall k (c :: k -> Constraint). InstanceDec -> Q (TExp [SomeDictAndType c])
 decToDict = \case
     InstanceD _moverlap cxt typ _decs ->
         case cxt of
             [] -> do
+                x <- reify $ mkName "Data.Typeable.Typeable"
+                liftIO $ print x
                 let
+                    t :: Type
                     t =
                         case typ of
                             AppT _ t' ->
@@ -233,7 +273,21 @@ decToDict = \case
                         x
                     proxy =
                         [| Proxy :: Proxy $(pure t) |]
-                unsafeTExpCoerce [| [ SomeDictOf $proxy ] |]
+
+                    liftRep =  pprint t
+                isTypable <- isInstance (mkName "Data.Typeable.Typeable") [t]
+
+                if isTypable
+                then unsafeTExpCoerce [| [ MkSomeDictAndType
+                                       { sdatSomeDict = SomeDictOf $proxy
+                                       , sdatLifted   = MkLiftedType $ liftRep
+                                       , sdatRep      = Just (typeRep $proxy)
+                                       }] |]
+                else unsafeTExpCoerce [| [ MkSomeDictAndType
+                                       { sdatSomeDict = SomeDictOf $proxy
+                                       , sdatLifted   = MkLiftedType $ liftRep
+                                       , sdatRep      = Nothing
+                                       }] |]
             _ -> do
                 -- reportWarning $
                 --     "I haven't figured out how to put constrained instances on here, so I'm skipping the type: "
